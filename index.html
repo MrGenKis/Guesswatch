@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>GuessWhat - Jeu de dessin</title>
+    <style>
+        #drawingCanvas {
+            border: 2px solid black;
+            background-color: #f0f0f0;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <h1>GuessWhat - Jeu de dessin</h1>
+
+    <div id="roomSection">
+        <input type="text" id="nicknameInput" placeholder="Choisir un surnom" />
+        <button onclick="setNickname()">Changer de surnom</button>
+        <br><br>
+
+        <button onclick="createRoom()">Créer une Room</button>
+        <br><br>
+
+        <input type="text" id="roomCodeInput" placeholder="Entrer le code de la room" />
+        <button onclick="joinRoom()">Rejoindre une Room</button>
+        <p id="roomCodeDisplay"></p>
+    </div>
+
+    <div id="chatSection" style="display:none;">
+        <h2>Chat dans la Room</h2>
+        <input type="text" id="messageInput" placeholder="Tapez un message" />
+        <button onclick="sendMessage()">Envoyer</button>
+        <div id="messages"></div>
+
+        <!-- Zone de dessin -->
+        <canvas id="drawingCanvas" width="500" height="400"></canvas>
+
+        <!-- Mot à dessiner pour le dessinateur -->
+        <p id="wordToDraw" style="display:none;"></p>
+
+        <!-- Section pour deviner le mot -->
+        <div id="guessSection" style="display:none;">
+            <h3>Devinez le mot :</h3>
+            <input type="text" id="guessInput" placeholder="Votre supposition" />
+            <button onclick="sendGuess()">Envoyer la supposition</button>
+        </div>
+    </div>
+
+    <script>
+        const ws = new WebSocket("ws://localhost:12345/ws");
+        let currentRoomCode = "";
+        let nickname = "";
+        let isDrawing = false;
+        let isDrawer = false;
+        let canvas, ctx;
+        let prevX = 0;
+        let prevY = 0;
+
+        ws.onopen = function() {
+            console.log("Connexion WebSocket établie");
+        };
+
+        ws.onmessage = function(event) {
+            const response = JSON.parse(event.data);
+
+            if (response.type === "roomCreated") {
+                currentRoomCode = response.roomCode;
+                console.log("Room créée avec le code: ", currentRoomCode);
+                document.getElementById("roomCodeDisplay").innerText = "Code de la room: " + currentRoomCode;
+                switchToChat();
+
+            } else if (response.type === "roomJoined") {
+                currentRoomCode = response.roomCode;
+                console.log("Rejoint la room: ", currentRoomCode);
+                switchToChat();
+
+            } else if (response.type === "message") {
+                const messagesDiv = document.getElementById("messages");
+                messagesDiv.innerHTML += `<p><strong>${response.nickname || "Anonyme"}:</strong> ${response.message}</p>`;
+
+            } else if (response.type === "yourWord") {
+                // Ce client est le dessinateur
+                isDrawer = true;
+                document.getElementById("wordToDraw").style.display = "block";
+                document.getElementById("wordToDraw").innerText = "Vous devez dessiner : " + response.message;
+                document.getElementById("guessSection").style.display = "none";
+
+            } else if (response.type === "startGuessing") {
+                // Ce client doit deviner
+                isDrawer = false;
+                document.getElementById("wordToDraw").style.display = "none";
+                document.getElementById("guessSection").style.display = "block";
+
+            } else if (response.type === "draw") {
+                if (!isDrawer) {
+                    drawFromServer(response);
+                }
+            } else if (response.type === "guessCorrect") {
+                alert(response.message);
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            } else if (response.type === "clearCanvas") {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            } else if (response.type === "youWon") {
+                alert(response.message);
+            }
+        };
+
+        ws.onclose = function(event) {
+            console.log("WebSocket fermée: ", event);
+        };
+
+        ws.onerror = function(error) {
+            console.log("Erreur WebSocket: ", error);
+        };
+
+        function sendMessage() {
+            const message = document.getElementById("messageInput").value;
+            if (ws.readyState === WebSocket.OPEN && currentRoomCode !== "") {
+                ws.send(JSON.stringify({ type: "message", message: message, roomCode: currentRoomCode }));
+                document.getElementById("messageInput").value = "";
+            } else {
+                console.log("Vous devez être dans une room pour envoyer des messages.");
+            }
+        }
+
+        function setNickname() {
+            nickname = document.getElementById("nicknameInput").value;
+            if (nickname) {
+                ws.send(JSON.stringify({ type: "nickname", nickname: nickname }));
+                console.log("Pseudo défini : ", nickname);
+            }
+        }
+
+        function createRoom() {
+            if (nickname === "") {
+                alert("Veuillez définir un pseudo avant de créer une room.");
+                return;
+            }
+            ws.send(JSON.stringify({ type: "createRoom" }));
+        }
+
+        function joinRoom() {
+            const roomCode = document.getElementById("roomCodeInput").value;
+            if (nickname === "") {
+                alert("Veuillez définir un pseudo avant de rejoindre une room.");
+                return;
+            }
+            if (roomCode) {
+                ws.send(JSON.stringify({ type: "joinRoom", roomCode: roomCode }));
+            }
+        }
+
+        function switchToChat() {
+            document.getElementById("roomSection").style.display = "none";
+            document.getElementById("chatSection").style.display = "block";
+            initCanvas();
+        }
+
+        function initCanvas() {
+            canvas = document.getElementById("drawingCanvas");
+            ctx = canvas.getContext("2d");
+
+            canvas.addEventListener("mousedown", startDrawing);
+            canvas.addEventListener("mouseup", stopDrawing);
+            canvas.addEventListener("mouseout", stopDrawing);
+            canvas.addEventListener("mousemove", draw);
+        }
+
+        function startDrawing(event) {
+            if (!isDrawer) return; 
+            isDrawing = true;
+            prevX = event.offsetX;
+            prevY = event.offsetY;
+        }
+
+        function stopDrawing() {
+            if (!isDrawer) return;
+            isDrawing = false;
+        }
+
+        function draw(event) {
+            if (!isDrawing || !isDrawer) return;
+
+            const x = event.offsetX;
+            const y = event.offsetY;
+
+            if (ws.readyState === WebSocket.OPEN && currentRoomCode !== "") {
+                ws.send(JSON.stringify({
+                    type: "draw",
+                    prevX: prevX,
+                    prevY: prevY,
+                    x: x,
+                    y: y,
+                    roomCode: currentRoomCode
+                }));
+            }
+
+            ctx.lineWidth = 5;
+            ctx.lineCap = "round";
+            ctx.strokeStyle = "#000";
+
+            ctx.beginPath();
+            ctx.moveTo(prevX, prevY);
+            ctx.lineTo(x, y);
+            ctx.stroke();
+
+            prevX = x;
+            prevY = y;
+        }
+
+        function drawFromServer(data) {
+            ctx.lineWidth = 5;
+            ctx.lineCap = "round";
+            ctx.strokeStyle = "#000";
+
+            ctx.beginPath();
+            ctx.moveTo(data.prevX, data.prevY);
+            ctx.lineTo(data.x, data.y);
+            ctx.stroke();
+        }
+
+        function sendGuess() {
+            const guess = document.getElementById("guessInput").value;
+            if (guess && ws.readyState === WebSocket.OPEN && currentRoomCode !== "") {
+                ws.send(JSON.stringify({
+                    type: "guess",
+                    message: guess,
+                    roomCode: currentRoomCode
+                }));
+                document.getElementById("guessInput").value = "";
+            }
+        }
+    </script>
+</body>
+</html>
